@@ -55,6 +55,12 @@ func (a *App) inspect(ctx context.Context, args []string) error {
 		if p.KeptFiles > 0 {
 			a.ui.Line("Kept       %s in place", plural2(p.KeptFiles, "file"))
 		}
+		if n := len(p.RescueMessages); n > 0 {
+			a.ui.Line("Rescued    %s, in %s", plural2(n, "stash entry"), p.Rescue)
+			for _, m := range p.RescueMessages {
+				a.ui.Detail("%s", m)
+			}
+		}
 		a.ui.Detail("id %s, park cycle %d, clav %s", p.ID, p.Cycle, p.ClavVersion)
 		return nil
 	}

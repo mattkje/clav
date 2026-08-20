@@ -159,6 +159,18 @@ func (a *App) restoreRemote(ctx context.Context, ref project.Ref, record state.P
 
 	a.settle(ctx, staging, record)
 
+	// Put the rescued stash entries back before the clone moves into place, so
+	// a failure here leaves the parked entry — and the bundle — untouched.
+	if record.Rescue != "" {
+		step = a.ui.Step("Restoring rescued work")
+		bundle := a.Store.Resolve(record.Rescue)
+		if err := git.UnbundleStashes(ctx, staging, bundle, record.RescueMessages); err != nil {
+			step.Fail()
+			return err
+		}
+		step.Done()
+	}
+
 	// Merge the clone into the folder that is already there, rather than
 	// swapping directories: the user's shell is very often standing in it, and
 	// a rename would leave that shell inside a directory clav then deletes.
@@ -201,6 +213,12 @@ func (a *App) restoreRemote(ctx context.Context, ref project.Ref, record state.P
 	summary := fmt.Sprintf("%s restored · %s", a.ui.bold(record.Name), ref.Display())
 	if record.KeptFiles > 0 {
 		summary += fmt.Sprintf(" · %s kept in place", plural2(record.KeptFiles, "file"))
+	}
+	if n := len(record.RescueMessages); n > 0 {
+		summary += fmt.Sprintf(" · %s back on the stash", plural2(n, "entry"))
+		// The stash commits carry their index state, so a pop with --index puts
+		// back exactly what was staged.
+		a.ui.Note("  see them with 'git stash list'; 'git stash pop --index' keeps what was staged")
 	}
 	a.ui.Detail("%d entries merged in", moved)
 	a.ui.Result("%s", summary)
@@ -334,9 +352,12 @@ func (a *App) release(ref project.Ref, record state.Project, keep bool) error {
 	}); err != nil {
 		return fmt.Errorf("the project was restored but clav's state could not be updated: %w", err)
 	}
-	if record.Archive != "" {
-		if err := os.Remove(a.Store.Resolve(record.Archive)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			a.ui.Warn("could not delete the archive %s: %v", record.Archive, err)
+	for _, rel := range []string{record.Archive, record.Rescue} {
+		if rel == "" {
+			continue
+		}
+		if err := os.Remove(a.Store.Resolve(rel)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			a.ui.Warn("could not delete %s: %v", rel, err)
 		}
 	}
 	return nil

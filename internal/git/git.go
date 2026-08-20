@@ -209,6 +209,11 @@ func (r *Repo) LsRemote(ctx context.Context, name string) ([]string, error) {
 // Unpushed returns commits reachable from local refs but not from any of the
 // given remote commits. Remote commits the repository does not have locally
 // are skipped: they mean the remote is ahead, which is not clav's problem.
+//
+// Branches whose work has already landed on the remote are left out — see
+// UnmergedBranches. A year-old feature branch that was squash-merged still
+// holds commits no remote has, and treating those as unfinished work would
+// make park refuse every repository anyone actually works in.
 func (r *Repo) Unpushed(ctx context.Context, remoteShas []string) (count int, sample []string, err error) {
 	have := make([]string, 0, len(remoteShas))
 	for _, sha := range remoteShas {
@@ -219,8 +224,15 @@ func (r *Repo) Unpushed(ctx context.Context, remoteShas []string) (count int, sa
 	if len(have) == 0 {
 		return -1, nil, nil // nothing in common; the caller must decide
 	}
-	args := append([]string{"rev-list", "--count", "HEAD", "--branches", "--tags", "--not"}, have...)
-	out, err := run(ctx, r.Root, args...)
+	live, _, err := r.UnmergedBranches(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	positives := append([]string{"HEAD"}, live...)
+	positives = append(positives, "--tags")
+
+	args := append(append([]string{"rev-list", "--count"}, positives...), "--not")
+	out, err := run(ctx, r.Root, append(args, have...)...)
 	if err != nil {
 		return 0, nil, fmt.Errorf("cannot compare local commits with the remote: %w", err)
 	}
@@ -228,19 +240,128 @@ func (r *Repo) Unpushed(ctx context.Context, remoteShas []string) (count int, sa
 		return 0, nil, fmt.Errorf("cannot compare local commits with the remote: %w", err)
 	}
 	if count > 0 {
-		args = append([]string{"log", "--oneline", "-n", "3", "HEAD", "--branches", "--tags", "--not"}, have...)
-		if out, err := run(ctx, r.Root, args...); err == nil {
+		args = append(append([]string{"log", "--oneline", "-n", "3"}, positives...), "--not")
+		if out, err := run(ctx, r.Root, append(args, have...)...); err == nil {
 			sample = lines(out)
 		}
 	}
 	return count, sample, nil
 }
 
-// UnpushedLocal counts commits that no remote-tracking ref knows about. It
-// asks only what is already on disk, so it costs nothing and works offline —
-// which is exactly what --force needs to be able to warn about.
+// UnmergedBranches splits the local branches into those with work the remote
+// has not seen and those whose work has already landed on it.
+//
+// Three things count as landed:
+//
+//	the branch is an ancestor of the remote's default branch (an ordinary merge)
+//	the branch is an ancestor of the remote branch of the same name
+//	the branch's changes, squashed into one commit, are already upstream
+//
+// The third is the case that matters in practice: a forge that squash-merges
+// leaves every merged branch looking unpushed forever, because none of its
+// commits exist on the remote by name.
+func (r *Repo) UnmergedBranches(ctx context.Context) (unmerged, merged []string, err error) {
+	out, err := run(ctx, r.Root, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot list branches: %w", err)
+	}
+	upstream := r.defaultRemoteBranch(ctx)
+	for _, branch := range lines(out) {
+		if r.landed(ctx, branch, upstream) {
+			merged = append(merged, branch)
+			continue
+		}
+		unmerged = append(unmerged, branch)
+	}
+	return unmerged, merged, nil
+}
+
+// landed reports whether a branch's work is already on the remote.
+func (r *Repo) landed(ctx context.Context, branch, upstream string) bool {
+	for _, target := range []string{upstream, r.remoteTwin(ctx, branch)} {
+		if target == "" {
+			continue
+		}
+		if _, err := run(ctx, r.Root, "merge-base", "--is-ancestor", branch, target); err == nil {
+			return true
+		}
+	}
+	if upstream == "" {
+		return false
+	}
+	return r.squashedInto(ctx, branch, upstream)
+}
+
+// squashedInto asks whether everything a branch changed is already upstream as
+// a single commit. It builds the commit that a squash-merge of this branch
+// would have produced and looks for its patch upstream. The synthesised commit
+// is never referenced, so it is unreachable the moment this returns.
+func (r *Repo) squashedInto(ctx context.Context, branch, upstream string) bool {
+	base, err := run(ctx, r.Root, "merge-base", branch, upstream)
+	if err != nil {
+		return false
+	}
+	synth, err := run(ctx, r.Root, "commit-tree", branch+"^{tree}",
+		"-p", strings.TrimSpace(base), "-m", "clav squash probe")
+	if err != nil {
+		return false
+	}
+	out, err := run(ctx, r.Root, "cherry", upstream, strings.TrimSpace(synth))
+	if err != nil {
+		return false
+	}
+	// "-" means git found this patch upstream already; "+" means it did not.
+	for _, line := range lines(out) {
+		return strings.HasPrefix(line, "-")
+	}
+	// No output at all: nothing to compare, so nothing is missing either.
+	return true
+}
+
+// defaultRemoteBranch is the remote's main line of development.
+func (r *Repo) defaultRemoteBranch(ctx context.Context) string {
+	origin, ok := r.Origin()
+	if !ok {
+		return ""
+	}
+	if out, err := run(ctx, r.Root, "symbolic-ref", "--quiet", "--short",
+		"refs/remotes/"+origin.Name+"/HEAD"); err == nil {
+		return strings.TrimSpace(out)
+	}
+	for _, name := range []string{"main", "master", "trunk", "develop"} {
+		ref := origin.Name + "/" + name
+		if _, err := run(ctx, r.Root, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil {
+			return ref
+		}
+	}
+	return ""
+}
+
+// remoteTwin is the remote-tracking branch of the same name, if there is one.
+func (r *Repo) remoteTwin(ctx context.Context, branch string) string {
+	origin, ok := r.Origin()
+	if !ok {
+		return ""
+	}
+	ref := origin.Name + "/" + branch
+	if _, err := run(ctx, r.Root, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+		return ""
+	}
+	return ref
+}
+
+// UnpushedLocal counts commits that no remote-tracking ref knows about, and
+// that are not on a branch whose work has already landed. It asks only what is
+// already on disk, so it costs nothing and works offline — which is what
+// --force and sweep need.
 func (r *Repo) UnpushedLocal(ctx context.Context) int {
-	out, err := run(ctx, r.Root, "rev-list", "--count", "HEAD", "--branches", "--tags", "--not", "--remotes")
+	live, _, err := r.UnmergedBranches(ctx)
+	if err != nil {
+		return 0
+	}
+	args := append([]string{"rev-list", "--count", "HEAD"}, live...)
+	args = append(args, "--tags", "--not", "--remotes")
+	out, err := run(ctx, r.Root, args...)
 	if err != nil {
 		return 0
 	}
@@ -252,7 +373,9 @@ func (r *Repo) UnpushedLocal(ctx context.Context) int {
 }
 
 // BranchesWithUnpushed lists local branches holding commits none of the given
-// remote commits reach. These are exactly the branches a push has to cover.
+// remote commits reach. These are exactly the branches a push has to cover —
+// branches whose work already landed are left alone, so pushing never puts a
+// long-merged branch back on the remote.
 func (r *Repo) BranchesWithUnpushed(ctx context.Context, remoteShas []string) ([]string, error) {
 	have := make([]string, 0, len(remoteShas))
 	for _, sha := range remoteShas {
@@ -260,12 +383,12 @@ func (r *Repo) BranchesWithUnpushed(ctx context.Context, remoteShas []string) ([
 			have = append(have, sha)
 		}
 	}
-	out, err := run(ctx, r.Root, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+	live, _, err := r.UnmergedBranches(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("cannot list branches: %w", err)
+		return nil, err
 	}
 	var behind []string
-	for _, branch := range lines(out) {
+	for _, branch := range live {
 		args := append([]string{"rev-list", "--count", branch, "--not"}, have...)
 		count, cerr := run(ctx, r.Root, args...)
 		if cerr != nil {
@@ -302,6 +425,100 @@ func LastCommit(ctx context.Context, dir string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("no commits")
 	}
 	return time.Unix(unix, 0), nil
+}
+
+// Stash is one entry from the stash list.
+type Stash struct {
+	SHA     string
+	Message string
+}
+
+// Stashes lists the stash entries, newest first — the order git shows them in.
+func (r *Repo) StashList(ctx context.Context) ([]Stash, error) {
+	out, err := run(ctx, r.Root, "stash", "list", "--format=%H%x1f%gs")
+	if err != nil {
+		return nil, fmt.Errorf("cannot list stashes: %w", err)
+	}
+	var out2 []Stash
+	for _, line := range lines(out) {
+		parts := strings.SplitN(line, "\x1f", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		out2 = append(out2, Stash{SHA: strings.TrimSpace(parts[0]), Message: parts[1]})
+	}
+	return out2, nil
+}
+
+// StashCurrentChanges builds a stash commit from the uncommitted changes in the
+// working copy without touching the working copy itself. It returns "" when
+// there is nothing to save.
+func (r *Repo) StashCurrentChanges(ctx context.Context) (string, error) {
+	out, err := run(ctx, r.Root, "stash", "create")
+	if err != nil {
+		return "", fmt.Errorf("cannot capture the uncommitted changes: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// RescueRef is the ref namespace clav parks rescued work under. The refs only
+// ever exist inside a bundle and inside a freshly restored clone.
+const RescueRef = "refs/clav/rescue"
+
+// Bundle writes the given commits to a bundle file, leaving out everything the
+// remote already has so the file stays small. Each commit is written under
+// RescueRef/<index>, in the order given.
+func (r *Repo) Bundle(ctx context.Context, dest string, commits []string) error {
+	if len(commits) == 0 {
+		return errors.New("nothing to bundle")
+	}
+	refs := make([]string, 0, len(commits))
+	for i, sha := range commits {
+		ref := fmt.Sprintf("%s/%d", RescueRef, i)
+		if _, err := run(ctx, r.Root, "update-ref", ref, sha); err != nil {
+			return fmt.Errorf("cannot mark %s for rescue: %w", short(sha), err)
+		}
+		refs = append(refs, ref)
+	}
+	// The refs are only scaffolding for the bundle; the repository they live in
+	// is about to be deleted anyway, but leave it as it was found.
+	defer func() {
+		for _, ref := range refs {
+			_, _ = run(ctx, r.Root, "update-ref", "-d", ref)
+		}
+	}()
+
+	args := append([]string{"bundle", "create", dest}, refs...)
+	if _, err := run(ctx, r.Root, append(args, "--not", "--remotes")...); err == nil {
+		return nil
+	}
+	// A repository with no remote-tracking refs cannot exclude anything.
+	if _, err := run(ctx, r.Root, args...); err != nil {
+		return fmt.Errorf("cannot save the rescued work: %w", err)
+	}
+	return nil
+}
+
+// UnbundleStashes pulls rescued commits out of a bundle and puts them back on
+// the stash, oldest last, so `git stash list` reads as it did before parking.
+func UnbundleStashes(ctx context.Context, dir, bundle string, messages []string) error {
+	spec := RescueRef + "/*:" + RescueRef + "/*"
+	if _, err := run(ctx, dir, "fetch", "--quiet", bundle, spec); err != nil {
+		return fmt.Errorf("cannot read the rescued work from %s: %w", bundle, err)
+	}
+	// Stored newest last, because each store goes on top of the stash.
+	for i := len(messages) - 1; i >= 0; i-- {
+		ref := fmt.Sprintf("%s/%d", RescueRef, i)
+		sha, err := run(ctx, dir, "rev-parse", ref)
+		if err != nil {
+			return fmt.Errorf("the rescued work is missing %s: %w", ref, err)
+		}
+		if _, err := run(ctx, dir, "stash", "store", "-m", messages[i], strings.TrimSpace(sha)); err != nil {
+			return fmt.Errorf("cannot put the rescued work back on the stash: %w", err)
+		}
+		_, _ = run(ctx, dir, "update-ref", "-d", ref)
+	}
+	return nil
 }
 
 // CloneOptions configures Clone.

@@ -77,7 +77,7 @@ Supported platforms: macOS and Linux, amd64 and arm64.
 | `clav inspect <path>` | Show details about a parked project |
 | `clav remove <path>` | Forget a parked project |
 
-Flags: `--push`, `--dry-run`, `--force`, `--keep-ignored`, `--keep`,
+Flags: `--push`, `--rescue`, `--dry-run`, `--force`, `--keep-ignored`, `--keep`,
 `--verbose` / `-v`, `--help` / `-h`, `--version`. Flags may appear before or
 after the path.
 
@@ -90,6 +90,7 @@ clav park                                # the project you are in
 clav park ~/Projects/sorta               # or name it explicitly
 clav park --dry-run                      # show what would go, change nothing
 clav park --push                         # push what the remote is missing first
+clav park --rescue                       # save stashes and uncommitted work
 clav park ~/Projects/sorta --verbose     # show each step
 ```
 
@@ -113,6 +114,32 @@ $ clav park --push
 pushed booking-fix to origin
 ✓ sorta parked · 1.84 GB freed · 11 files kept
 ```
+
+`--rescue` saves the work that has nowhere else to live. Every stash entry, and
+the uncommitted changes — staged and unstaged both — are written into a git
+bundle in `~/.clav/rescue`, and `clav restore` puts them straight back on the
+stash:
+
+```
+$ clav park --rescue
+✓ sorta parked · 1.84 GB freed · 11 files kept · 3 stash entries rescued
+
+$ clav restore
+✓ sorta restored · ~/Projects/sorta · 11 files kept in place · 3 entries back on the stash
+  see them with 'git stash list'; 'git stash pop --index' keeps what was staged
+
+$ git stash list
+stash@{0}: clav rescue: uncommitted changes when parked
+stash@{1}: On main: second idea
+stash@{2}: On main: first idea
+```
+
+What was staged stays staged: the entries are real stash commits, index state
+and all, so `git stash pop --index` gives back exactly the working copy you
+parked. Nothing is pushed anywhere — this is work you never chose to publish,
+so clav keeps it locally. The bundle holds only what the remote does not already have,
+so it is usually a few kilobytes, and it is deleted once the project is
+restored.
 
 #### What is deleted, what is kept
 
@@ -147,15 +174,25 @@ If nothing is left to keep, the project folder itself is removed.
 
 Without `--force`, `clav park` stops when anything would be lost:
 
-- uncommitted changes to tracked files
-- commits the remote does not have, on any branch, upstream or not
-- a stash — it lives only in `.git`
+- uncommitted changes to tracked files — `--rescue` saves them instead
+- commits the remote does not have, on any branch, upstream or not — `--push`
+  sends them instead
+- a stash: it lives only in `.git` — `--rescue` saves it instead
 - a remote it cannot reach, so it cannot confirm the copy exists
 - no commit in common with the remote (run `git fetch` first)
 
 `--force` skips these checks but still says what it is about to destroy — dirty
 files, stash entries, and commits no remote-tracking branch has — because those
 are gone for good once `.git` is deleted.
+
+Branches whose work has already landed are not counted. A forge that
+squash-merges leaves every merged branch looking permanently unpushed — its
+commits exist nowhere on the remote by name — and a repository anyone has
+worked in for a year accumulates dozens of them. clav treats a branch as landed
+when it is an ancestor of the remote's default branch, an ancestor of the
+remote branch of the same name, or when the single commit a squash-merge of it
+would produce is already upstream. Run with `--verbose` to see which branches
+were passed over.
 
 The check is a real `git ls-remote` against the remote, not a remote-tracking
 ref that may be weeks stale. It gives up after 20 seconds rather than hanging on
@@ -217,6 +254,7 @@ a restorable entry rather than a half-emptied folder.
 clav sweep ~/Developer                       # what could be parked here?
 clav sweep ~/Developer --older-than 60d      # only projects idle that long
 clav sweep ~/Developer --push                # push stragglers so they qualify
+clav sweep ~/Developer --rescue              # save their stashes so they qualify
 clav sweep ~/Developer --yes                 # do not ask
 clav sweep ~/Developer --dry-run             # table only
 ```
@@ -337,7 +375,8 @@ Remove sorta? [y/N]
 ```
 
 For a project parked to its remote this deletes nothing at all — it only drops
-clav's entry. For an archived project it deletes the archive permanently, which
+clav's entry, though any work `--rescue` saved goes with it, and `remove` says
+so before asking. For an archived project it deletes the archive permanently, which
 is the only copy. Only `y` or `yes` counts as consent; anything else, including
 end-of-input on a non-interactive stdin, is a no. `--force` skips the prompt.
 
@@ -349,6 +388,8 @@ end-of-input on a non-interactive stdin, is a no. `--force` skips the prompt.
 ├── lock
 ├── archives/          # only for repositories with no remote
 │   └── 4c9a02f5e18d-003.tar.zst
+├── rescue/            # stashes and uncommitted work saved by --rescue
+│   └── 11ed803aa8b7-001.bundle
 └── tmp/
 ```
 
@@ -404,7 +445,8 @@ awkward filenames all survive the round trip.
   code path, so the number you are shown is the number that happens.
 - **Nothing is deleted before the remote is confirmed to have it.** The check is
   a live `ls-remote`, and it covers every local branch and tag, not just the
-  current one.
+  current one — minus the branches whose work has demonstrably already landed
+  on the remote.
 - **Nothing untracked is ever deleted**, apart from ignored directories on the
   regenerable list — and `--keep-ignored` turns even that off.
 - **The record is written first.** Park writes its state entry before deleting

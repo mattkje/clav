@@ -59,6 +59,12 @@ type Project struct {
 	Branch     string `json:"branch,omitempty"`
 	Commit     string `json:"commit,omitempty"`
 	Submodules bool   `json:"submodules,omitempty"`
+	// Rescue is a git bundle in clav's storage holding stashed and uncommitted
+	// work that has nowhere else to live. RescueMessages names each entry, in
+	// stash order.
+	Rescue         string   `json:"rescue,omitempty"`
+	RescueMessages []string `json:"rescue_messages,omitempty"`
+
 	// KeptFiles counts the untracked files left behind in the project folder.
 	KeptFiles int `json:"kept_files,omitempty"`
 	// FreedBytes is how much disk parking reclaimed.
@@ -165,6 +171,9 @@ func Open(root string) (*Store, error) {
 	if err := os.MkdirAll(s.TempDir(), 0o700); err != nil {
 		return nil, fmt.Errorf("cannot create %s: %w", s.TempDir(), err)
 	}
+	if err := os.MkdirAll(s.RescueDir(), 0o700); err != nil {
+		return nil, fmt.Errorf("cannot create %s: %w", s.RescueDir(), err)
+	}
 	return s, nil
 }
 
@@ -173,6 +182,10 @@ func (s *Store) Root() string { return s.root }
 
 // ArchivesDir holds the compressed project archives.
 func (s *Store) ArchivesDir() string { return filepath.Join(s.root, "archives") }
+
+// RescueDir holds the bundles of stashed and uncommitted work rescued at park
+// time. It is the only other place clav ever stores your content.
+func (s *Store) RescueDir() string { return filepath.Join(s.root, "rescue") }
 
 // TempDir holds in-progress archives. It lives on the same filesystem as
 // ArchivesDir so that completed archives can be moved into place atomically.

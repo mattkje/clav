@@ -1397,3 +1397,154 @@ func TestSweepPushMakesUnpushedProjectsReady(t *testing.T) {
 		t.Errorf("the commit was not pushed before parking: %s", log)
 	}
 }
+
+// --- rescuing work that lives only in .git ---------------------------------
+
+func TestRescueSavesStashesAndUncommittedWork(t *testing.T) {
+	h := newHarness(t)
+	root, _ := h.remoteProject("rescuable")
+
+	// Two stash entries...
+	writeFile(t, filepath.Join(root, "main.go"), "package main // stash one\n", 0o644)
+	gitAt(t, root, "stash", "push", "-q", "-m", "first idea")
+	writeFile(t, filepath.Join(root, "main.go"), "package main // stash two\n", 0o644)
+	gitAt(t, root, "stash", "push", "-q", "-m", "second idea")
+	// ...plus uncommitted work, staged and unstaged at once.
+	writeFile(t, filepath.Join(root, "main.go"), "package main // staged\n", 0o644)
+	gitAt(t, root, "add", "main.go")
+	writeFile(t, filepath.Join(root, "src", "app.go"), "package src // unstaged\n", 0o644)
+
+	out := h.mustRun("park", root, "--rescue")
+	if !strings.Contains(out, "rescued") {
+		t.Errorf("park --rescue should say what it saved:\n%s", out)
+	}
+	if exists(t, filepath.Join(root, ".git")) {
+		t.Fatal("the project was not parked")
+	}
+
+	h.mustRun("restore", root)
+	list := gitOut(t, root, "stash", "list")
+	for _, want := range []string{"first idea", "second idea", "uncommitted changes when parked"} {
+		if !strings.Contains(list, want) {
+			t.Errorf("stash list is missing %q:\n%s", want, list)
+		}
+	}
+	if n := len(strings.Split(strings.TrimSpace(list), "\n")); n != 3 {
+		t.Errorf("stash list has %d entries, want 3:\n%s", n, list)
+	}
+
+	// The newest entry is the uncommitted work, and it really does carry both
+	// the staged and the unstaged change.
+	gitAt(t, root, "stash", "pop", "-q")
+	if got := mustRead(t, filepath.Join(root, "main.go")); got != "package main // staged\n" {
+		t.Errorf("staged change did not come back: %q", got)
+	}
+	if got := mustRead(t, filepath.Join(root, "src", "app.go")); got != "package src // unstaged\n" {
+		t.Errorf("unstaged change did not come back: %q", got)
+	}
+}
+
+func TestRescueOnlyRunsWhenAsked(t *testing.T) {
+	h := newHarness(t)
+	root, _ := h.remoteProject("blocked")
+	writeFile(t, filepath.Join(root, "main.go"), "package main // edited\n", 0o644)
+
+	_, err := h.run("park", root)
+	if err == nil {
+		t.Fatal("park should still refuse uncommitted work by default")
+	}
+	if !strings.Contains(err.Error(), "--rescue") {
+		t.Errorf("the error should point at --rescue: %v", err)
+	}
+}
+
+func TestRescueBundleIsCleanedUp(t *testing.T) {
+	h := newHarness(t)
+	root, _ := h.remoteProject("tidy")
+	writeFile(t, filepath.Join(root, "main.go"), "package main // wip\n", 0o644)
+	h.mustRun("park", root, "--rescue")
+
+	bundles, err := os.ReadDir(filepath.Join(h.home, "rescue"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundles) != 1 {
+		t.Fatalf("expected one rescue bundle, got %v", bundles)
+	}
+	if out := h.mustRun("inspect", root); !strings.Contains(out, "Rescued") {
+		t.Errorf("inspect should mention the rescued work:\n%s", out)
+	}
+
+	h.mustRun("restore", root)
+	bundles, err = os.ReadDir(filepath.Join(h.home, "rescue"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundles) != 0 {
+		t.Errorf("restore left the bundle behind: %v", bundles)
+	}
+}
+
+func TestRemoveDeletesTheRescueBundle(t *testing.T) {
+	h := newHarness(t)
+	root, _ := h.remoteProject("dropped")
+	writeFile(t, filepath.Join(root, "main.go"), "package main // idea\n", 0o644)
+	gitAt(t, root, "stash", "push", "-q", "-m", "idea")
+	writeFile(t, filepath.Join(root, "main.go"), "package main // wip\n", 0o644)
+	h.mustRun("park", root, "--rescue")
+
+	h.stdin = "y\n"
+	out := h.mustRun("remove", root)
+	if !strings.Contains(out, "deleted for good") {
+		t.Errorf("remove should warn that the rescued work goes too:\n%s", out)
+	}
+	bundles, err := os.ReadDir(filepath.Join(h.home, "rescue"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundles) != 0 {
+		t.Errorf("remove left the bundle behind: %v", bundles)
+	}
+}
+
+func TestRescueDryRunSavesNothing(t *testing.T) {
+	h := newHarness(t)
+	root, _ := h.remoteProject("planning")
+	writeFile(t, filepath.Join(root, "main.go"), "package main // idea\n", 0o644)
+	gitAt(t, root, "stash", "push", "-q", "-m", "idea")
+
+	out := h.mustRun("park", root, "--rescue", "--dry-run")
+	if !strings.Contains(out, "would rescue") {
+		t.Errorf("dry run should mention the rescue:\n%s", out)
+	}
+	bundles, err := os.ReadDir(filepath.Join(h.home, "rescue"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundles) != 0 {
+		t.Errorf("--dry-run wrote a bundle: %v", bundles)
+	}
+	if !exists(t, filepath.Join(root, ".git")) {
+		t.Error("--dry-run parked the project")
+	}
+}
+
+func TestSweepRescueMakesDirtyProjectsReady(t *testing.T) {
+	h := newHarness(t)
+	root, _ := h.remoteProject("messy")
+	writeFile(t, filepath.Join(root, "main.go"), "package main // wip\n", 0o644)
+	backdate(t, root)
+
+	if out := h.mustRun("sweep", h.base, "--older-than", "1d", "--dry-run"); !strings.Contains(out, "uncommitted file") {
+		t.Errorf("without --rescue the project should be blocked:\n%s", out)
+	}
+	h.stdin = "y\n"
+	h.mustRun("sweep", h.base, "--older-than", "1d", "--rescue")
+	if exists(t, filepath.Join(root, ".git")) {
+		t.Fatal("sweep --rescue did not park the project")
+	}
+	h.mustRun("restore", root)
+	if list := gitOut(t, root, "stash", "list"); !strings.Contains(list, "uncommitted changes when parked") {
+		t.Errorf("the rescued work did not come back:\n%s", list)
+	}
+}

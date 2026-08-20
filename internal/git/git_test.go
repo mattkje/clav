@@ -303,3 +303,110 @@ func TestCancellationIsReportedAsCancellation(t *testing.T) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }
+
+func TestSquashMergedBranchesDoNotCountAsUnpushed(t *testing.T) {
+	ctx := context.Background()
+	root, _ := setup(t)
+
+	// A feature branch, merged the way a forge squash-merges: one new commit on
+	// main carrying the whole change, and the branch itself never pushed.
+	do(t, root, "checkout", "-q", "-b", "feature/thing")
+	write(t, filepath.Join(root, "feature.go"), "package main // one\n")
+	do(t, root, "add", "feature.go")
+	do(t, root, "commit", "-qm", "start the thing")
+	write(t, filepath.Join(root, "feature.go"), "package main // two\n")
+	do(t, root, "add", "feature.go")
+	do(t, root, "commit", "-qm", "finish the thing")
+
+	do(t, root, "checkout", "-q", "main")
+	do(t, root, "merge", "-q", "--squash", "feature/thing")
+	do(t, root, "commit", "-qm", "feature: the thing (!42)")
+	do(t, root, "push", "-q", "origin", "main")
+
+	repo, err := Open(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unmerged, merged, err := repo.UnmergedBranches(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// main has landed too — it is an ancestor of origin/main.
+	if !contains(merged, "feature/thing") || !contains(merged, "main") {
+		t.Errorf("merged = %v, want feature/thing and main", merged)
+	}
+	if len(unmerged) != 0 {
+		t.Errorf("unmerged = %v, want none", unmerged)
+	}
+
+	shas, err := repo.LsRemote(ctx, "origin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, _, err := repo.Unpushed(ctx, shas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d; a squash-merged branch is not unfinished work", count)
+	}
+	if n := repo.UnpushedLocal(ctx); n != 0 {
+		t.Errorf("UnpushedLocal = %d, want 0", n)
+	}
+
+	// Real unfinished work on another branch still counts.
+	do(t, root, "checkout", "-q", "-b", "feature/wip")
+	write(t, filepath.Join(root, "wip.go"), "package main\n")
+	do(t, root, "add", "wip.go")
+	do(t, root, "commit", "-qm", "genuinely unpushed")
+	count, sample, err := repo.Unpushed(ctx, shas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("count = %d, want 1", count)
+	}
+	if len(sample) != 1 || !strings.Contains(sample[0], "genuinely unpushed") {
+		t.Errorf("sample = %v", sample)
+	}
+	branches, err := repo.BranchesWithUnpushed(ctx, shas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branches) != 1 || branches[0] != "feature/wip" {
+		t.Errorf("BranchesWithUnpushed = %v, want [feature/wip]; a merged branch must never be pushed back", branches)
+	}
+}
+
+func TestOrdinaryMergedBranchesAreAlsoIgnored(t *testing.T) {
+	ctx := context.Background()
+	root, _ := setup(t)
+	do(t, root, "checkout", "-q", "-b", "feature/merged")
+	write(t, filepath.Join(root, "f.go"), "package main\n")
+	do(t, root, "add", "f.go")
+	do(t, root, "commit", "-qm", "work")
+	do(t, root, "checkout", "-q", "main")
+	do(t, root, "merge", "-q", "--no-ff", "-m", "merge it", "feature/merged")
+	do(t, root, "push", "-q", "origin", "main")
+
+	repo, err := Open(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, merged, err := repo.UnmergedBranches(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(merged, "feature/merged") {
+		t.Errorf("merged = %v, want it to include feature/merged", merged)
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

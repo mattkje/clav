@@ -279,6 +279,7 @@ Usage:
 
 Flags:
   --push                 park pushes what the remote is missing first
+  --rescue               park saves stashes and uncommitted changes into clav
   --dry-run              show what park or sweep would do, change nothing
   --force                park with unpushed work / replace an existing directory
   --keep-ignored         park keeps ignored build and dependency directories
@@ -292,7 +293,9 @@ Everything else in the folder — notes, .env files, editor settings, anything
 git does not know about — is left untouched.
 
 Parking is refused when the remote does not already have your work: dirty
-tracked files, unpushed commits or a stash. --force overrides that.
+tracked files, unpushed commits or a stash. --push sends the commits, --rescue
+saves the stashes and uncommitted changes into ~/.clav and puts them back on
+the stash when you restore, and --force overrides the lot.
 
 A repository with no remote has nowhere to be cloned back from, so clav
 archives the whole directory into ~/.clav (override with CLAV_HOME).

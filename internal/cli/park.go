@@ -15,7 +15,7 @@ import (
 	"clav/internal/state"
 )
 
-const parkUsage = `Usage: clav park [path] [--push] [--dry-run] [--force] [--keep-ignored] [--verbose]
+const parkUsage = `Usage: clav park [path] [--push] [--rescue] [--dry-run] [--force] [--keep-ignored] [--verbose]
 
 Frees the disk a git project is using. Everything git tracks is deleted along
 with .git and the ignored build and dependency directories; every other file
@@ -29,6 +29,7 @@ A repository with no remote has nowhere to be restored from, so clav archives
 the whole directory instead.
 
   --push          push branches the remote is missing first, then park
+  --rescue        save stashes and uncommitted changes into clav, then park
   --dry-run       show what would be deleted and kept, change nothing
   --force         park even though the remote is missing changes or unreachable
   --keep-ignored  keep ignored build and dependency directories too`
@@ -38,6 +39,7 @@ func (a *App) park(ctx context.Context, args []string) error {
 	force := cmd.fs.Bool("force", false, "park even with unpushed work")
 	keepIgnored := cmd.fs.Bool("keep-ignored", false, "keep ignored directories")
 	push := cmd.fs.Bool("push", false, "push what the remote is missing first")
+	rescue := cmd.fs.Bool("rescue", false, "save stashes and uncommitted changes")
 	dryRun := cmd.fs.Bool("dry-run", false, "show what would happen")
 	if err := cmd.parse(args); err != nil {
 		return err
@@ -51,6 +53,7 @@ func (a *App) park(ctx context.Context, args []string) error {
 		force:       *force,
 		keepIgnored: *keepIgnored,
 		push:        *push,
+		rescue:      *rescue,
 		dryRun:      *dryRun,
 	}
 	// Resolve the working directory before anything is deleted; os.Getwd stops
@@ -113,6 +116,7 @@ type parkOptions struct {
 	force       bool
 	keepIgnored bool
 	push        bool
+	rescue      bool
 	dryRun      bool
 }
 
@@ -127,7 +131,7 @@ func (a *App) parkRemote(ctx context.Context, ref project.Ref, repo *git.Repo, o
 	}
 	if opts.force {
 		a.warnWhatForceOverrides(ctx, repo)
-	} else if err := a.checkSafeToPark(ctx, ref, repo, origin, opts.push); err != nil {
+	} else if err := a.checkSafeToPark(ctx, ref, repo, origin, opts); err != nil {
 		return err
 	}
 
@@ -141,6 +145,12 @@ func (a *App) parkRemote(ctx context.Context, ref project.Ref, repo *git.Repo, o
 	a.ui.Detail("%s", strings.Join(namesOf(doomed, 8), ", "))
 
 	if opts.dryRun {
+		if opts.rescue {
+			if n := a.rescuableCount(ctx, repo); n > 0 {
+				a.ui.Line("would rescue  %-18s → saved into %s",
+					plural2(n, "stash entry"), project.Shorten(a.Store.RescueDir()))
+			}
+		}
 		return a.reportDryRun(ref, doomed)
 	}
 
@@ -150,20 +160,39 @@ func (a *App) parkRemote(ctx context.Context, ref project.Ref, repo *git.Repo, o
 	if err != nil {
 		return err
 	}
+
+	// Save whatever has nowhere else to live, before .git — the only thing that
+	// holds it — is deleted.
+	rescueRel, rescueMessages := "", []string(nil)
+	if opts.rescue {
+		rescueRel, rescueMessages, err = a.rescueWork(ctx, repo, id)
+		if err != nil {
+			return err
+		}
+	}
+	keepRescue := false
+	defer func() {
+		if rescueRel != "" && !keepRescue {
+			_ = os.Remove(a.Store.Resolve(rescueRel))
+		}
+	}()
+
 	record := state.Project{
-		ID:           id,
-		Kind:         state.KindRemote,
-		Name:         ref.Name,
-		OriginalPath: ref.Path,
-		PathKey:      ref.Key,
-		CreatedAt:    time.Now().UTC().Truncate(time.Second),
-		Cycle:        cycle,
-		ClavVersion:  Version,
-		RemoteName:   origin.Name,
-		RemoteURL:    git.AbsoluteURL(ref.Path, origin.URL),
-		Branch:       repo.Branch,
-		Commit:       repo.Commit,
-		Submodules:   len(repo.Submodules) > 0,
+		ID:             id,
+		Kind:           state.KindRemote,
+		Name:           ref.Name,
+		OriginalPath:   ref.Path,
+		PathKey:        ref.Key,
+		CreatedAt:      time.Now().UTC().Truncate(time.Second),
+		Cycle:          cycle,
+		ClavVersion:    Version,
+		RemoteName:     origin.Name,
+		RemoteURL:      git.AbsoluteURL(ref.Path, origin.URL),
+		Branch:         repo.Branch,
+		Commit:         repo.Commit,
+		Submodules:     len(repo.Submodules) > 0,
+		Rescue:         rescueRel,
+		RescueMessages: rescueMessages,
 	}
 	if err := a.Store.Update(func(f *state.File) error {
 		if _, ok := f.Find(ref.Key); ok {
@@ -174,6 +203,7 @@ func (a *App) parkRemote(ctx context.Context, ref project.Ref, repo *git.Repo, o
 	}); err != nil {
 		return err
 	}
+	keepRescue = true
 
 	step = a.ui.Step("Deleting tracked content")
 	purged, err := project.Remove(ref.Path, doomed)
@@ -218,6 +248,9 @@ func (a *App) parkRemote(ctx context.Context, ref project.Ref, repo *git.Repo, o
 	case folderGone:
 		summary += " · folder removed"
 	}
+	if n := len(rescueMessages); n > 0 {
+		summary += fmt.Sprintf(" · %s rescued", plural2(n, "stash entry"))
+	}
 	a.ui.Result("%s", summary)
 	a.shellHint(startDir, ref, folderGone)
 	return nil
@@ -237,6 +270,61 @@ func (a *App) warnWhatForceOverrides(ctx context.Context, repo *git.Repo) {
 		a.ui.Warn("--force: discarding %s no remote-tracking branch has; "+
 			"they cannot be recovered", plural2(n, "commit"))
 	}
+}
+
+// rescueWork saves the stash entries and the uncommitted changes into a git
+// bundle in clav's own storage. Nothing goes to the remote: this is work the
+// user never chose to publish, and clav does not choose for them.
+//
+// The bundle carries only what the remote does not already have, so it is
+// normally a few kilobytes.
+func (a *App) rescueWork(ctx context.Context, repo *git.Repo, id string) (string, []string, error) {
+	stashes, err := repo.StashList(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	commits := make([]string, 0, len(stashes)+1)
+	messages := make([]string, 0, len(stashes)+1)
+	for _, st := range stashes {
+		commits = append(commits, st.SHA)
+		messages = append(messages, st.Message)
+	}
+
+	// The uncommitted changes become the newest stash entry, which is where
+	// someone looking for them will expect to find them.
+	wip, err := repo.StashCurrentChanges(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	if wip != "" {
+		commits = append([]string{wip}, commits...)
+		messages = append([]string{"clav rescue: uncommitted changes when parked"}, messages...)
+	}
+	if len(commits) == 0 {
+		return "", nil, nil
+	}
+
+	rel := filepath.Join("rescue", id+".bundle")
+	step := a.ui.Step("Rescuing local work")
+	if err := repo.Bundle(ctx, a.Store.Resolve(rel), commits); err != nil {
+		step.Fail()
+		return "", nil, err
+	}
+	step.Done()
+	for _, m := range messages {
+		a.ui.Detail("rescued %s", m)
+	}
+	return filepath.ToSlash(rel), messages, nil
+}
+
+// rescuableCount is how many stash entries a rescue would save, counting the
+// uncommitted changes as one.
+func (a *App) rescuableCount(ctx context.Context, repo *git.Repo) int {
+	n := repo.Stashes(ctx)
+	if dirty, err := repo.DirtyTracked(ctx); err == nil && len(dirty) > 0 {
+		n++
+	}
+	return n
 }
 
 // doomedPaths is everything git can hand back: the index, .git itself, the
@@ -334,23 +422,27 @@ func elide(names []string, max int) []string {
 // checkSafeToPark refuses to delete anything the remote cannot give back.
 // With push, the one blocker clav can clear on its own — commits the remote
 // has not seen — is cleared instead of reported.
-func (a *App) checkSafeToPark(ctx context.Context, ref project.Ref, repo *git.Repo, origin git.Remote, push bool) error {
+func (a *App) checkSafeToPark(ctx context.Context, ref project.Ref, repo *git.Repo, origin git.Remote, opts parkOptions) error {
 	step := a.ui.Step("Checking for local work")
 	dirty, err := repo.DirtyTracked(ctx)
 	if err != nil {
 		step.Fail()
 		return err
 	}
-	if len(dirty) > 0 {
+	// With --rescue these are not blockers: the work is about to be saved into
+	// clav's own storage, so deleting .git no longer loses it.
+	if len(dirty) > 0 && !opts.rescue {
 		step.Fail()
 		return fmt.Errorf("%s has uncommitted changes to %s\n%s\n"+
-			"       commit and push them, or park anyway with --force",
+			"       commit and push them, save them with 'clav park --rescue',\n"+
+			"       or park anyway with --force",
 			ref.Display(), plural2(len(dirty), "tracked file"), indent(dirty, 3))
 	}
-	if n := repo.Stashes(ctx); n > 0 {
+	if n := repo.Stashes(ctx); n > 0 && !opts.rescue {
 		step.Fail()
 		return fmt.Errorf("%s has %s; a stash lives only in .git and would be lost\n"+
-			"       apply or drop it, or park anyway with --force", ref.Display(), plural2(n, "stash entry"))
+			"       save it with 'clav park --rescue', apply or drop it,\n"+
+			"       or park anyway with --force", ref.Display(), plural2(n, "stash entry"))
 	}
 	step.Done()
 
@@ -369,12 +461,16 @@ func (a *App) checkSafeToPark(ctx context.Context, ref project.Ref, repo *git.Re
 		return err
 	}
 	step.Done()
+	if _, landed, lerr := repo.UnmergedBranches(ctx); lerr == nil && len(landed) > 0 {
+		a.ui.Detail("ignoring %s already merged into %s: %s",
+			plural2(len(landed), "branch"), origin.Name, strings.Join(elide(landed, 5), ", "))
+	}
 	switch {
 	case count < 0:
 		return fmt.Errorf("%s has no commit in common with %s\n"+
 			"       run 'git fetch %s' first, or park anyway with --force",
 			ref.Display(), origin.Name, origin.Name)
-	case count > 0 && push:
+	case count > 0 && opts.push:
 		if err := a.pushMissing(ctx, repo, origin, shas); err != nil {
 			return err
 		}

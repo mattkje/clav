@@ -54,6 +54,9 @@ func (a *App) remove(_ context.Context, args []string) error {
 		} else {
 			a.ui.Line("This forgets %s. The code stays on %s and kept files stay in the folder.",
 				p.Name, p.RemoteName)
+			if n := len(p.RescueMessages); n > 0 {
+				a.ui.Line("%s rescued from the stash will be deleted for good.", plural2(n, "entry"))
+			}
 		}
 		ok, err := a.confirm(fmt.Sprintf("Remove %s? [y/N] ", p.Name))
 		if err != nil {
@@ -75,10 +78,13 @@ func (a *App) remove(_ context.Context, args []string) error {
 	}); err != nil {
 		return err
 	}
-	if p.Archive != "" {
-		archivePath := a.Store.Resolve(p.Archive)
-		if err := os.Remove(archivePath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("removed the metadata but could not delete %s: %w", archivePath, err)
+	for _, rel := range []string{p.Archive, p.Rescue} {
+		if rel == "" {
+			continue
+		}
+		path := a.Store.Resolve(rel)
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("removed the metadata but could not delete %s: %w", path, err)
 		}
 	}
 

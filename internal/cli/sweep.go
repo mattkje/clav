@@ -13,7 +13,7 @@ import (
 	"clav/internal/project"
 )
 
-const sweepUsage = `Usage: clav sweep [path] [--older-than 60d] [--push] [--yes] [--dry-run] [--depth N] [--verbose]
+const sweepUsage = `Usage: clav sweep [path] [--older-than 60d] [--push] [--rescue] [--yes] [--dry-run] [--depth N] [--verbose]
 
 Looks through a directory for git projects worth parking, shows what each one
 would free, and parks the ones that are ready. A project is ready when the
@@ -24,6 +24,7 @@ With no path, clav sweeps the current directory.
 
   --older-than    only consider projects untouched for this long (default 30d)
   --push          push what the remote is missing, so those projects count too
+  --rescue        save stashes and uncommitted changes, so those count too
   --yes           do not ask before parking
   --dry-run       show the table and stop
   --depth N       how far below the path to look for projects (default 4)`
@@ -43,6 +44,7 @@ func (a *App) sweep(ctx context.Context, args []string) error {
 	dryRun := cmd.fs.Bool("dry-run", false, "show the table and stop")
 	depth := cmd.fs.Int("depth", project.DefaultDepth, "how deep to look")
 	push := cmd.fs.Bool("push", false, "push what the remote is missing first")
+	rescue := cmd.fs.Bool("rescue", false, "save stashes and uncommitted changes")
 	if err := cmd.parse(args); err != nil {
 		return err
 	}
@@ -76,7 +78,7 @@ func (a *App) sweep(ctx context.Context, args []string) error {
 	a.ui.Detail("%s found under %s", plural2(len(repos), "project"), project.Shorten(dir))
 
 	cutoff := time.Now().Add(-age)
-	candidates, err := a.inspectCandidates(ctx, repos, cutoff, *push)
+	candidates, err := a.inspectCandidates(ctx, repos, cutoff, *push, *rescue)
 	if err != nil {
 		return err
 	}
@@ -105,7 +107,7 @@ func (a *App) sweep(ctx context.Context, args []string) error {
 	// delete anything on.
 	parked, failed := 0, 0
 	for _, c := range ready {
-		if err := a.parkPath(ctx, c.ref.Path, "", parkOptions{push: *push}, ""); err != nil {
+		if err := a.parkPath(ctx, c.ref.Path, "", parkOptions{push: *push, rescue: *rescue}, ""); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
 			}
@@ -124,7 +126,7 @@ func (a *App) sweep(ctx context.Context, args []string) error {
 // inspectCandidates asks each project about itself. Every question is answered
 // from the local repository, so a sweep of a large directory costs no network
 // round trips at all.
-func (a *App) inspectCandidates(ctx context.Context, repos []string, cutoff time.Time, push bool) ([]candidate, error) {
+func (a *App) inspectCandidates(ctx context.Context, repos []string, cutoff time.Time, push, rescue bool) ([]candidate, error) {
 	current, err := a.Store.Load()
 	if err != nil {
 		return nil, err
@@ -150,7 +152,7 @@ func (a *App) inspectCandidates(ctx context.Context, repos []string, cutoff time
 			continue
 		}
 
-		c := candidate{ref: ref, lastCommit: last, status: a.blocker(ctx, repo, push)}
+		c := candidate{ref: ref, lastCommit: last, status: a.blocker(ctx, repo, push, rescue)}
 		if c.status == "" {
 			// Only a project that could actually be parked is worth measuring.
 			doomed, derr := a.doomedPaths(ctx, repo, false)
@@ -181,17 +183,17 @@ func (a *App) inspectCandidates(ctx context.Context, repos []string, cutoff time
 // blocker names the reason a project is not ready, or "" when it is. The
 // answers come from the local repository only; park re-checks against the
 // remote before deleting anything.
-func (a *App) blocker(ctx context.Context, repo *git.Repo, push bool) string {
+func (a *App) blocker(ctx context.Context, repo *git.Repo, push, rescue bool) string {
 	if _, ok := repo.Origin(); !ok {
 		return "no remote"
 	}
 	if repo.Commit == "" {
 		return "no commits"
 	}
-	if dirty, err := repo.DirtyTracked(ctx); err == nil && len(dirty) > 0 {
+	if dirty, err := repo.DirtyTracked(ctx); err == nil && len(dirty) > 0 && !rescue {
 		return plural2(len(dirty), "uncommitted file")
 	}
-	if n := repo.Stashes(ctx); n > 0 {
+	if n := repo.Stashes(ctx); n > 0 && !rescue {
 		return plural2(n, "stash entry")
 	}
 	if n := repo.UnpushedLocal(ctx); n > 0 && !push {

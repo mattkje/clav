@@ -83,6 +83,10 @@ func plural2(n int, unit string) string {
 	if n == 1 {
 		return "1 " + unit
 	}
+	if strings.HasSuffix(unit, "ch") || strings.HasSuffix(unit, "sh") ||
+		strings.HasSuffix(unit, "s") || strings.HasSuffix(unit, "x") {
+		return fmt.Sprintf("%d %ses", n, unit)
+	}
 	if strings.HasSuffix(unit, "y") {
 		return fmt.Sprintf("%d %sies", n, strings.TrimSuffix(unit, "y"))
 	}
