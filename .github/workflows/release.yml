@@ -4,7 +4,9 @@ name: release
 # install.sh downloads exactly these files.
 on:
   push:
-    tags: ['v*']
+    # Both "v0.1.0" and "0.1.0" are accepted: a release that silently does not
+    # happen because of a missing letter is worse than a loose pattern.
+    tags: ['v[0-9]*', '[0-9]*']
 
 permissions:
   contents: write
