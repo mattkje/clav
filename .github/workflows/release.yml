@@ -7,6 +7,13 @@ on:
     # Both "v0.1.0" and "0.1.0" are accepted: a release that silently does not
     # happen because of a missing letter is worse than a loose pattern.
     tags: ['v[0-9]*', '[0-9]*']
+  # Publishing an existing tag by hand, for when a release needs rebuilding
+  # without inventing a new version number.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and publish (e.g. v0.1.0)'
+        required: true
 
 permissions:
   contents: write
@@ -14,9 +21,12 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0 # the version string comes from git describe
 
       - uses: actions/setup-go@v5
@@ -33,11 +43,24 @@ jobs:
       - name: checksums
         run: make checksums
 
+      # Upload into a release that already exists rather than failing on it: a
+      # tag is often pushed after someone has drafted the release by hand, and
+      # a re-run has to be able to replace a bad set of binaries.
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            dist/*
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists; uploading binaries into it"
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              dist/*
+          fi
+
+      - name: what was published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$TAG" --json assets --jq '.assets[].name'
