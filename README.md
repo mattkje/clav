@@ -34,13 +34,31 @@ clav: ~/Projects/sorta has 2 commits that origin does not have
 
 ## Install
 
+### One line
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mattkje/clav/main/install.sh | sh
+```
+
+Works out your platform, downloads that binary from the latest GitHub release,
+verifies it against the release checksums, and puts it in `~/.local/bin`. It
+refuses to install anything whose checksum does not match.
+
+```bash
+CLAV_INSTALL_DIR=/usr/local/bin ...   # install somewhere else (uses sudo if needed)
+CLAV_VERSION=v0.2.0 ...               # pin a version
+```
+
+Piping a script into a shell is worth reading first:
+<https://github.com/mattkje/clav/blob/main/install.sh>.
+
 ### From source
 
 Requires Go 1.22 or newer and `git` on your `PATH`. The result is a single
 static binary.
 
 ```bash
-git clone <this-repo> clav
+git clone https://github.com/mattkje/clav.git
 cd clav
 make install            # builds and installs to /usr/local/bin/clav
 ```
@@ -54,7 +72,7 @@ make install PREFIX="$HOME/.local"
 ### With go install
 
 ```bash
-go install clav/cmd/clav@latest   # replace with the module path of your fork
+go install github.com/mattkje/clav/cmd/clav@latest
 ```
 
 ### Build only
@@ -62,7 +80,12 @@ go install clav/cmd/clav@latest   # replace with the module path of your fork
 ```bash
 make build              # -> bin/clav
 make dist               # -> dist/clav-{darwin,linux}-{amd64,arm64}
+make checksums          # -> dist/checksums.txt
 ```
+
+Tagging a version (`git tag v0.2.0 && git push --tags`) builds all four
+binaries in CI and publishes them as a GitHub release, which is what the
+installer downloads.
 
 Supported platforms: macOS and Linux, amd64 and arm64.
 

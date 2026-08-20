@@ -8,10 +8,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"clav/internal/archive"
-	"clav/internal/git"
-	"clav/internal/project"
-	"clav/internal/state"
+	"github.com/mattkje/clav/internal/archive"
+	"github.com/mattkje/clav/internal/git"
+	"github.com/mattkje/clav/internal/project"
+	"github.com/mattkje/clav/internal/state"
 )
 
 const restoreUsage = `Usage: clav restore [path] [--force] [--keep] [--verbose]

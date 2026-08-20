@@ -1,9 +1,10 @@
 BINARY  := clav
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -s -w -X clav/internal/cli.Version=$(VERSION)
+# The version comes from the git tag, without its leading "v".
+VERSION ?= $(patsubst v%,%,$(shell git describe --tags --always --dirty 2>/dev/null || echo dev))
+LDFLAGS := -s -w -X github.com/mattkje/clav/internal/cli.Version=$(VERSION)
 PREFIX  ?= /usr/local
 
-.PHONY: all build test race vet fmt install uninstall clean dist
+.PHONY: all build test race vet fmt install uninstall clean dist checksums
 
 all: vet test build
 
@@ -41,3 +42,8 @@ dist: clean
 			-o dist/$(BINARY)-$$os-$$arch ./cmd/clav || exit 1; \
 	done
 	@ls -1 dist
+
+# checksums.txt is what install.sh verifies the download against.
+checksums: 
+	@cd dist && (sha256sum * 2>/dev/null || shasum -a 256 *) | grep -v checksums.txt > checksums.txt
+	@cat dist/checksums.txt

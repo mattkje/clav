@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"clav/internal/archive"
-	"clav/internal/project"
-	"clav/internal/state"
+	"github.com/mattkje/clav/internal/archive"
+	"github.com/mattkje/clav/internal/project"
+	"github.com/mattkje/clav/internal/state"
 )
 
 const inspectUsage = `Usage: clav inspect <path> [--verify] [--verbose]

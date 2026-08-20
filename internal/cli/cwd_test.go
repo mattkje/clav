@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"clav/internal/project"
-	"clav/internal/state"
+	"github.com/mattkje/clav/internal/project"
+	"github.com/mattkje/clav/internal/state"
 )
 
 // runFrom drives clav as if the user's shell were sitting in cwd.

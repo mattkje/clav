@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          check-latest: true
+      - name: vet and format
+        run: make vet
+      - name: test
+        run: go test -count=1 ./...
+      - name: test with the race detector
+        run: go test -race -count=1 ./...

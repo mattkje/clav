@@ -17,8 +17,8 @@ import (
 	"strings"
 	"syscall"
 
-	"clav/internal/project"
-	"clav/internal/state"
+	"github.com/mattkje/clav/internal/project"
+	"github.com/mattkje/clav/internal/state"
 )
 
 // Version is set at build time with -ldflags "-X clav/internal/cli.Version=...".

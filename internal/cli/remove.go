@@ -9,8 +9,8 @@ import (
 	"os"
 	"strings"
 
-	"clav/internal/project"
-	"clav/internal/state"
+	"github.com/mattkje/clav/internal/project"
+	"github.com/mattkje/clav/internal/state"
 )
 
 const removeUsage = `Usage: clav remove <path> [--force] [--verbose]

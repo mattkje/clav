@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"clav/internal/state"
+	"github.com/mattkje/clav/internal/state"
 )
 
 // harness is a clav installation with its own storage root, driven exactly the

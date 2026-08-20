@@ -1,0 +1,41 @@
+name: release
+
+# Tagging a version builds the binaries and publishes them as a GitHub release.
+# install.sh downloads exactly these files.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the version string comes from git describe
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          check-latest: true
+
+      - name: test
+        run: go test -count=1 ./...
+
+      - name: build every platform
+        run: make dist
+
+      - name: checksums
+        run: make checksums
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*

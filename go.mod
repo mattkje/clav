@@ -1,4 +1,4 @@
-module clav
+module github.com/mattkje/clav
 
 go 1.22
 

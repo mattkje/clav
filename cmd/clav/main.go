@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"clav/internal/cli"
+	"github.com/mattkje/clav/internal/cli"
 )
 
 func main() {

@@ -8,8 +8,8 @@ import (
 
 	"strings"
 
-	"clav/internal/project"
-	"clav/internal/state"
+	"github.com/mattkje/clav/internal/project"
+	"github.com/mattkje/clav/internal/state"
 )
 
 const listUsage = `Usage: clav list [--verbose]

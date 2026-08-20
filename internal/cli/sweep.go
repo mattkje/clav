@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"clav/internal/git"
-	"clav/internal/project"
+	"github.com/mattkje/clav/internal/git"
+	"github.com/mattkje/clav/internal/project"
 )
 
 const sweepUsage = `Usage: clav sweep [path] [--older-than 60d] [--push] [--rescue] [--yes] [--dry-run] [--depth N] [--verbose]
