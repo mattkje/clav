@@ -1,0 +1,4 @@
+bin/
+dist/
+*.tar.zst
+.DS_Store
