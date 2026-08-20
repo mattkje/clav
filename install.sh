@@ -8,14 +8,19 @@
 #
 # Environment:
 #   CLAV_VERSION      version to install (default: the latest release)
-#   CLAV_INSTALL_DIR  where to put the binary (default: ~/.local/bin)
+#   CLAV_INSTALL_DIR  where to put the binary (default: /usr/local/bin)
 #   CLAV_BASE_URL     where to download from (default: the GitHub release)
 
 set -eu
 
 REPO="mattkje/clav"
 BINARY="clav"
-INSTALL_DIR="${CLAV_INSTALL_DIR:-$HOME/.local/bin}"
+# /usr/local/bin is on PATH in the standard macOS and Linux shell setups.  A
+# user-owned ~/.local/bin is tempting, but it is not on macOS's default PATH,
+# which leaves a successful install unusable until the user changes their
+# shell configuration.  Use the conventional system-wide location instead;
+# the existing install branch asks for sudo only when it is actually needed.
+INSTALL_DIR="${CLAV_INSTALL_DIR:-/usr/local/bin}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'clav install: %s\n' "$*" >&2; exit 1; }
@@ -127,8 +132,8 @@ main() {
 		*":$INSTALL_DIR:"*) ;;
 		*)
 			say ""
-			say "$INSTALL_DIR is not on your PATH. Add it:"
-			say "  echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.zshrc && exec zsh"
+			say "$INSTALL_DIR is not on your current PATH. Open a new terminal, or add it to your shell configuration:"
+			say "  export PATH=\"$INSTALL_DIR:\$PATH\""
 			;;
 	esac
 

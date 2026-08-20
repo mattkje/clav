@@ -41,8 +41,10 @@ curl -fsSL https://raw.githubusercontent.com/mattkje/clav/main/install.sh | sh
 ```
 
 Works out your platform, downloads that binary from the latest GitHub release,
-verifies it against the release checksums, and puts it in `~/.local/bin`. It
-refuses to install anything whose checksum does not match.
+verifies it against the release checksums, and puts it in `/usr/local/bin` so
+it is available on the standard macOS and Linux `PATH`. It asks for `sudo` only
+when that directory requires it, and refuses to install anything whose checksum
+does not match.
 
 ```bash
 CLAV_INSTALL_DIR=/usr/local/bin ...   # install somewhere else (uses sudo if needed)
