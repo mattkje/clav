@@ -575,6 +575,33 @@ func CurrentBranch(ctx context.Context, dir string) string {
 	return strings.TrimSpace(out)
 }
 
+// HasHead reports whether a repository has a commit checked out. A fresh clone
+// of a remote whose HEAD points at a branch that no longer exists has none:
+// git leaves the working copy empty and says so in a warning nobody reads.
+func HasHead(ctx context.Context, dir string) bool {
+	_, err := run(ctx, dir, "rev-parse", "--verify", "--quiet", "HEAD")
+	return err == nil
+}
+
+// RemoteBranches lists the branches a clone got from its remote, in the order
+// git reports them, without the remote prefix.
+func RemoteBranches(ctx context.Context, dir, remote string) []string {
+	out, err := run(ctx, dir, "for-each-ref", "--format=%(refname:short)", "refs/remotes/"+remote)
+	if err != nil {
+		return nil
+	}
+	prefix := remote + "/"
+	var branches []string
+	for _, ref := range lines(out) {
+		name := strings.TrimPrefix(strings.TrimSpace(ref), prefix)
+		if name == "" || name == "HEAD" {
+			continue
+		}
+		branches = append(branches, name)
+	}
+	return branches
+}
+
 // Head returns the current commit of a repository.
 func Head(ctx context.Context, dir string) (string, error) {
 	out, err := run(ctx, dir, "rev-parse", "HEAD")

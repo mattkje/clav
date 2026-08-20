@@ -157,7 +157,9 @@ func (a *App) restoreRemote(ctx context.Context, ref project.Ref, record state.P
 	}
 	step.Done()
 
-	a.settle(ctx, staging, record)
+	if err := a.settle(ctx, staging, record); err != nil {
+		return err
+	}
 
 	// Put the rescued stash entries back before the clone moves into place, so
 	// a failure here leaves the parked entry — and the bundle — untouched.
@@ -229,30 +231,52 @@ func (a *App) restoreRemote(ctx context.Context, ref project.Ref, record state.P
 // far as the remote still has them, and says plainly when it cannot. A branch
 // that was never pushed, or has been deleted since, must not cost the user the
 // rest of the project.
-func (a *App) settle(ctx context.Context, dir string, record state.Project) {
-	if record.Branch != "" && !git.CheckoutBranch(ctx, dir, record.Branch) {
+func (a *App) settle(ctx context.Context, dir string, record state.Project) error {
+	remote := record.RemoteName
+	if remote == "" {
+		remote = "origin"
+	}
+
+	onBranch := record.Branch != "" && git.CheckoutBranch(ctx, dir, record.Branch)
+	if record.Branch != "" && !onBranch {
 		fallback := git.CurrentBranch(ctx, dir)
 		if fallback == "" {
 			fallback = "the default branch"
 		}
 		a.ui.Warn("%s is not on %s any more; restored %s instead",
-			record.Branch, record.RemoteName, fallback)
-		return
+			record.Branch, remote, fallback)
 	}
+
+	// A clone can land with nothing checked out at all: it happens whenever the
+	// remote's HEAD names a branch that has since been deleted or renamed. An
+	// empty directory is not a restored project, so take any branch the remote
+	// does have rather than call that a success.
+	if !git.HasHead(ctx, dir) {
+		branches := git.RemoteBranches(ctx, dir, remote)
+		if len(branches) == 0 {
+			return fmt.Errorf("%s has no branches; there is nothing to restore", record.RemoteURL)
+		}
+		if !git.CheckoutBranch(ctx, dir, branches[0]) {
+			return fmt.Errorf("cannot check out %s from %s", branches[0], record.RemoteURL)
+		}
+		a.ui.Warn("%s has no default branch; restored %s", remote, branches[0])
+	}
+
 	if record.Commit == "" {
-		return
+		return nil
 	}
 	head, err := git.Head(ctx, dir)
 	if err != nil || head == record.Commit {
-		return
+		return nil
 	}
 	if git.HasCommit(ctx, dir, record.Commit) {
 		a.ui.Note("  %s moved on since it was parked; run 'git checkout %s' for the exact parked commit",
 			record.Branch, shortSHA(record.Commit))
-		return
+		return nil
 	}
 	a.ui.Warn("the commit this project was parked at (%s) is not on %s any more",
-		shortSHA(record.Commit), record.RemoteName)
+		shortSHA(record.Commit), remote)
+	return nil
 }
 
 // restoreArchive unpacks a project that was archived because it had no remote.

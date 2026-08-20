@@ -530,4 +530,3 @@ nothing about either.
 Deliberately out of scope, but the design leaves room for them: `clav status`,
 `clav clean`, `clav config`, a configurable list of regenerable directories, and
 parking a repository to a remote it does not have yet.
-

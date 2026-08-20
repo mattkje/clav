@@ -108,7 +108,7 @@ func (h *harness) remoteProject(name string) (root, remote string) {
 	h.t.Helper()
 	remote = filepath.Join(h.base, "remotes", name+".git")
 	mk(h.t, filepath.Dir(remote))
-	gitAt(h.t, h.base, "init", "--bare", "-q", remote)
+	gitAt(h.t, h.base, "init", "--bare", "-q", "-b", "main", remote)
 
 	root = h.path(name)
 	mk(h.t, root)
@@ -328,7 +328,7 @@ func TestParkRemovesTheFolderWhenNothingIsKept(t *testing.T) {
 	h := newHarness(t)
 	remote := filepath.Join(h.base, "remotes", "clean.git")
 	mk(t, filepath.Dir(remote))
-	gitAt(t, h.base, "init", "--bare", "-q", remote)
+	gitAt(t, h.base, "init", "--bare", "-q", "-b", "main", remote)
 	root := h.path("clean")
 	mk(t, root)
 	gitAt(t, root, "init", "-q", "-b", "main")
@@ -1546,5 +1546,75 @@ func TestSweepRescueMakesDirtyProjectsReady(t *testing.T) {
 	h.mustRun("restore", root)
 	if list := gitOut(t, root, "stash", "list"); !strings.Contains(list, "uncommitted changes when parked") {
 		t.Errorf("the rescued work did not come back:\n%s", list)
+	}
+}
+
+// TestRestoreFromARemoteWithNoDefaultBranch pins what CI caught: cloning a
+// remote whose HEAD names a branch that does not exist leaves an empty working
+// copy, and clav used to call that a successful restore.
+func TestRestoreFromARemoteWithNoDefaultBranch(t *testing.T) {
+	h := newHarness(t)
+	root, remote := h.remoteProject("headless")
+	// Point the remote's HEAD at a branch it does not have, the way a forge
+	// does when its default branch is renamed or deleted.
+	gitAt(t, remote, "symbolic-ref", "HEAD", "refs/heads/nonexistent")
+
+	h.mustRun("park", root)
+	h.mustRun("restore", root)
+	if !exists(t, filepath.Join(root, "main.go")) {
+		t.Fatal("the project was not actually restored")
+	}
+	if !exists(t, filepath.Join(root, "notes.txt")) {
+		t.Error("the kept files did not come back")
+	}
+	if branch := strings.TrimSpace(gitOut(t, root, "rev-parse", "--abbrev-ref", "HEAD")); branch != "main" {
+		t.Errorf("restored on %q, want the branch the remote actually has", branch)
+	}
+}
+
+// With the parked branch gone as well, there is nothing left to aim at but
+// whatever branch the remote still has.
+func TestRestoreFallsBackToAnyBranchTheRemoteHas(t *testing.T) {
+	h := newHarness(t)
+	root, remote := h.remoteProject("adrift")
+	gitAt(t, root, "checkout", "-q", "-b", "only-here")
+	h.mustRun("park", root, "--force")
+	gitAt(t, remote, "symbolic-ref", "HEAD", "refs/heads/nonexistent")
+
+	out := h.mustRun("restore", root)
+	if !strings.Contains(out, "no default branch") {
+		t.Errorf("restore should say what it fell back to:\n%s", out)
+	}
+	if !exists(t, filepath.Join(root, "main.go")) {
+		t.Fatal("the project was not restored")
+	}
+	if branch := strings.TrimSpace(gitOut(t, root, "rev-parse", "--abbrev-ref", "HEAD")); branch != "main" {
+		t.Errorf("restored on %q, want the branch the remote actually has", branch)
+	}
+}
+
+func TestRestoreFailsWhenTheRemoteHasNothing(t *testing.T) {
+	h := newHarness(t)
+	root, remote := h.remoteProject("emptied")
+	h.mustRun("park", root)
+	// Every branch is gone from the remote after parking.
+	gitAt(t, remote, "symbolic-ref", "HEAD", "refs/heads/nonexistent")
+	gitAt(t, remote, "update-ref", "-d", "refs/heads/main")
+
+	_, err := h.run("restore", root)
+	if err == nil {
+		t.Fatal("restore should fail rather than leave an empty directory")
+	}
+	if !strings.Contains(err.Error(), "no branches") {
+		t.Errorf("unhelpful error: %v", err)
+	}
+	if exists(t, filepath.Join(root, ".git")) {
+		t.Error("a failed restore left a repository behind")
+	}
+	if !exists(t, filepath.Join(root, "notes.txt")) {
+		t.Error("a failed restore lost the kept files")
+	}
+	if out := h.mustRun("list"); !strings.Contains(out, "emptied") {
+		t.Error("the project should still be listed after a failed restore")
 	}
 }

@@ -26,7 +26,7 @@ func setup(t *testing.T) (root, remote string) {
 
 	base := t.TempDir()
 	remote = filepath.Join(base, "remote.git")
-	do(t, base, "init", "--bare", "-q", remote)
+	do(t, base, "init", "--bare", "-q", "-b", "main", remote)
 
 	root = filepath.Join(base, "project")
 	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
